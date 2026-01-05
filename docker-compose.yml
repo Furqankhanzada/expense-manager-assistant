@@ -17,8 +17,6 @@ services:
       - .env
     environment:
       - DATABASE_URL=postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-expense_secret}@postgres:5432/expense_manager
-    volumes:
-      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy

@@ -31,8 +31,6 @@ services:
       - WHISPER_MODEL=${WHISPER_MODEL:-base}
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - DEBUG=${DEBUG:-false}
-    volumes:
-      - bot-data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,5 +51,4 @@ services:
       retries: 5
 
 volumes:
-  bot-data:
   postgres-data:
