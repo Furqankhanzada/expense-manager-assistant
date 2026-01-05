@@ -44,6 +44,22 @@ async def create_db_pool() -> None:
 
     logger.info("Database connection pool created")
 
+    # Auto-create tables on startup
+    await init_db()
+
+
+async def init_db() -> None:
+    """Create database tables if they don't exist."""
+    from src.database.models import Base
+
+    if _engine is None:
+        raise RuntimeError("Database engine not initialized")
+
+    async with _engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    logger.info("Database tables created/verified")
+
 
 async def close_db_pool() -> None:
     """Close the database connection pool."""
