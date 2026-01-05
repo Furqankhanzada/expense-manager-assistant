@@ -81,8 +81,10 @@ async def handle_setup_currency(
     """Handle initial currency setup."""
     currency = callback.data.split(":")[2]
 
-    user_repo = UserRepository(session)
-    await user_repo.complete_setup(user.id, currency)
+    # Directly modify the user object (already tracked by session)
+    user.default_currency = currency
+    user.is_setup_complete = True
+    await session.flush()  # Ensure changes are written
 
     await callback.answer("Setup complete!")
     await callback.message.edit_text(
@@ -297,8 +299,9 @@ async def handle_currency_selection(
     """Handle currency selection."""
     currency = callback.data.split(":")[1]
 
-    user_repo = UserRepository(session)
-    await user_repo.update_currency(user.id, currency)
+    # Directly modify the user object
+    user.default_currency = currency
+    await session.flush()
 
     await callback.answer("Currency updated!")
     await callback.message.edit_text(

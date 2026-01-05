@@ -49,16 +49,42 @@ async def create_db_pool() -> None:
 
 
 async def init_db() -> None:
-    """Create database tables if they don't exist."""
+    """Create database tables and run migrations for new columns."""
     from src.database.models import Base
+    from sqlalchemy import text
 
     if _engine is None:
         raise RuntimeError("Database engine not initialized")
 
     async with _engine.begin() as conn:
+        # Create tables if they don't exist
         await conn.run_sync(Base.metadata.create_all)
 
-    logger.info("Database tables created/verified")
+        # Add missing columns to existing tables (migrations)
+        migrations = [
+            # Users table migrations
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_setup_complete BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS household_id UUID",
+            # Expenses table migrations
+            "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS group_chat_id BIGINT",
+        ]
+
+        for migration in migrations:
+            try:
+                await conn.execute(text(migration))
+            except Exception as e:
+                # Column might already exist or other non-critical error
+                logger.debug(f"Migration note: {e}")
+
+        # Create indexes if they don't exist
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_expenses_group_chat_id ON expenses(group_chat_id)"
+            ))
+        except Exception as e:
+            logger.debug(f"Index creation note: {e}")
+
+    logger.info("Database tables and migrations completed")
 
 
 async def close_db_pool() -> None:
