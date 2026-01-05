@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+from dataclasses import dataclass
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, Message
@@ -19,8 +20,16 @@ logger = logging.getLogger(__name__)
 
 router = Router()
 
+
+@dataclass
+class PendingReceipt:
+    """Pending receipt data with context."""
+    expenses: list[ParsedExpense]
+    group_chat_id: int | None = None
+
+
 # Temporary storage for pending receipt confirmations
-_pending_receipts: dict[str, list[ParsedExpense]] = {}
+_pending_receipts: dict[str, PendingReceipt] = {}
 
 
 @router.message(F.photo)
@@ -29,6 +38,8 @@ async def handle_photo_message(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    is_group: bool = False,
+    group_chat_id: int | None = None,
 ) -> None:
     """Handle photo messages and parse them as receipts."""
     processing_msg = await message.answer("Analyzing image...")
@@ -53,6 +64,12 @@ async def handle_photo_message(
             )
             return
 
+        # Add user attribution prefix for groups
+        added_by_prefix = ""
+        if is_group:
+            added_by = user.first_name or user.username or "Someone"
+            added_by_prefix = f"<i>Added by {added_by}</i>\n\n"
+
         # If single expense, add it directly
         if len(result.expenses) == 1:
             expense_data = result.expenses[0]
@@ -76,6 +93,7 @@ async def handle_photo_message(
                 source_type=SourceType.IMAGE,
                 raw_input="[Receipt image]",
                 expense_date=expense_data.expense_date,
+                group_chat_id=group_chat_id,
             )
 
             category_name = category.name if category else "Uncategorized"
@@ -87,7 +105,7 @@ async def handle_photo_message(
             currency = expense_data.currency or user.default_currency
 
             await processing_msg.edit_text(
-                f"Receipt processed{store_info}:\n\n"
+                f"{added_by_prefix}Receipt processed{store_info}:\n\n"
                 f"<b>{currency} {expense_data.amount:.2f}</b> - {icon}{category_name}\n"
                 f"{expense_data.description}\n"
                 f"{date_str}",
@@ -97,9 +115,12 @@ async def handle_photo_message(
 
         # Multiple expenses found - ask for confirmation
         confirm_id = str(uuid.uuid4())[:8]
-        _pending_receipts[confirm_id] = result.expenses
+        _pending_receipts[confirm_id] = PendingReceipt(
+            expenses=result.expenses,
+            group_chat_id=group_chat_id,
+        )
 
-        lines = ["Found expenses on receipt:\n"]
+        lines = [f"{added_by_prefix}Found expenses on receipt:\n"]
         total = sum(e.amount for e in result.expenses)
         currency = result.expenses[0].currency if result.expenses else user.default_currency
 
@@ -132,8 +153,8 @@ async def handle_receipt_confirm(
     """Confirm and save all receipt expenses."""
     confirm_id = callback.data.split(":")[2]
 
-    expenses_data = _pending_receipts.pop(confirm_id, None)
-    if not expenses_data:
+    pending = _pending_receipts.pop(confirm_id, None)
+    if not pending:
         await callback.answer("Receipt data expired. Please send the image again.")
         return
 
@@ -145,7 +166,7 @@ async def handle_receipt_confirm(
     categories = await cat_repo.get_by_user(user.id)
 
     saved_count = 0
-    for expense_data in expenses_data:
+    for expense_data in pending.expenses:
         category = None
         if expense_data.category:
             category = await cat_repo.get_by_name(user.id, expense_data.category)
@@ -161,11 +182,12 @@ async def handle_receipt_confirm(
             source_type=SourceType.IMAGE,
             raw_input="[Receipt image]",
             expense_date=expense_data.expense_date,
+            group_chat_id=pending.group_chat_id,
         )
         saved_count += 1
 
-    total = sum(e.amount for e in expenses_data)
-    currency = expenses_data[0].currency if expenses_data else user.default_currency
+    total = sum(e.amount for e in pending.expenses)
+    currency = pending.expenses[0].currency if pending.expenses else user.default_currency
 
     await callback.message.edit_text(
         f"Saved {saved_count} expenses from receipt.\n"

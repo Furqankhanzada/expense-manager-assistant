@@ -251,3 +251,103 @@ def export_format_keyboard() -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def setup_currency_keyboard() -> InlineKeyboardMarkup:
+    """Create keyboard for initial currency setup."""
+    currencies = [
+        ("USD", "$ USD"),
+        ("EUR", "€ EUR"),
+        ("GBP", "£ GBP"),
+        ("JPY", "¥ JPY"),
+        ("CAD", "C$ CAD"),
+        ("AUD", "A$ AUD"),
+        ("INR", "₹ INR"),
+        ("PKR", "Rs PKR"),
+        ("AED", "د.إ AED"),
+        ("SAR", "﷼ SAR"),
+    ]
+
+    buttons = []
+    row = []
+
+    for code, label in currencies:
+        btn = InlineKeyboardButton(
+            text=label,
+            callback_data=f"setup:currency:{code}",
+        )
+        row.append(btn)
+
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+
+    if row:
+        buttons.append(row)
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def family_menu_keyboard(has_household: bool, is_owner: bool = False) -> InlineKeyboardMarkup:
+    """Create keyboard for family/household menu."""
+    buttons = []
+
+    if has_household:
+        buttons.append([
+            InlineKeyboardButton(
+                text="View Members",
+                callback_data="family:members",
+            ),
+        ])
+        if is_owner:
+            buttons.append([
+                InlineKeyboardButton(
+                    text="Show Invite Code",
+                    callback_data="family:invite",
+                ),
+            ])
+            buttons.append([
+                InlineKeyboardButton(
+                    text="New Invite Code",
+                    callback_data="family:newinvite",
+                ),
+            ])
+        buttons.append([
+            InlineKeyboardButton(
+                text="Leave Household",
+                callback_data="family:leave",
+            ),
+        ])
+    else:
+        buttons.append([
+            InlineKeyboardButton(
+                text="Create Household",
+                callback_data="family:create",
+            ),
+        ])
+        buttons.append([
+            InlineKeyboardButton(
+                text="Join Household",
+                callback_data="family:join",
+            ),
+        ])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def confirm_leave_keyboard() -> InlineKeyboardMarkup:
+    """Create keyboard to confirm leaving household."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="Yes, Leave",
+                    callback_data="family:confirmleave",
+                ),
+                InlineKeyboardButton(
+                    text="Cancel",
+                    callback_data="family:cancelleave",
+                ),
+            ],
+        ]
+    )

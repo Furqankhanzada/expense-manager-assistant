@@ -42,6 +42,8 @@ async def handle_text_message(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    is_group: bool = False,
+    group_chat_id: int | None = None,
 ) -> None:
     """Handle text messages and parse them as expenses."""
     text = message.text.strip()
@@ -57,13 +59,15 @@ async def handle_text_message(
     parsed = await parse_expense(text, llm)
 
     if not parsed:
-        await message.answer(
-            "I couldn't identify an expense in your message.\n\n"
-            "Try something like:\n"
-            "- \"Spent $25 on lunch\"\n"
-            "- \"Uber ride 15 dollars\"\n"
-            "- \"paid 50 for groceries yesterday\""
-        )
+        # Only show help in private chats to avoid spam in groups
+        if not is_group:
+            await message.answer(
+                "I couldn't identify an expense in your message.\n\n"
+                "Try something like:\n"
+                "- \"Spent $25 on lunch\"\n"
+                "- \"Uber ride 15 dollars\"\n"
+                "- \"paid 50 for groceries yesterday\""
+            )
         return
 
     # Get categories and categorize
@@ -86,7 +90,7 @@ async def handle_text_message(
         category_name = category.name
         category_icon = category.icon
 
-    # Create expense
+    # Create expense (with group_chat_id if in a group)
     expense_repo = ExpenseRepository(session)
     expense = await expense_repo.create(
         user_id=user.id,
@@ -97,6 +101,7 @@ async def handle_text_message(
         source_type=SourceType.TEXT,
         raw_input=text,
         expense_date=parsed.expense_date,
+        group_chat_id=group_chat_id,
     )
 
     # Format date for display
@@ -112,6 +117,11 @@ async def handle_text_message(
         description=parsed.description,
         expense_date=date_str,
     )
+
+    # Add user attribution in group chats
+    if is_group:
+        added_by = user.first_name or user.username or "Someone"
+        response = f"<i>Added by {added_by}</i>\n\n" + response
 
     await message.answer(
         response,

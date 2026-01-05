@@ -16,7 +16,7 @@ from src.bot.handlers import (
     video_router,
     voice_router,
 )
-from src.bot.middlewares import DatabaseMiddleware, UserMiddleware
+from src.bot.middlewares import ChatContextMiddleware, DatabaseMiddleware, UserMiddleware
 from src.config import get_settings
 from src.database.connection import create_db_pool, close_db_pool
 
@@ -75,9 +75,11 @@ def create_dispatcher() -> Dispatcher:
     """Create and configure the dispatcher with routers and middleware."""
     dp = Dispatcher()
 
-    # Register middleware
+    # Register middleware (order matters - ChatContext first to set group context)
+    dp.message.middleware(ChatContextMiddleware())
     dp.message.middleware(DatabaseMiddleware())
     dp.message.middleware(UserMiddleware())
+    dp.callback_query.middleware(ChatContextMiddleware())
     dp.callback_query.middleware(DatabaseMiddleware())
     dp.callback_query.middleware(UserMiddleware())
 

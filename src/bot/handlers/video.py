@@ -26,9 +26,17 @@ async def handle_video_message(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    is_group: bool = False,
+    group_chat_id: int | None = None,
 ) -> None:
     """Handle video messages - extract audio and/or frames for expense parsing."""
     processing_msg = await message.answer("Processing video...")
+
+    # Add user attribution prefix for groups
+    added_by_prefix = ""
+    if is_group:
+        added_by = user.first_name or user.username or "Someone"
+        added_by_prefix = f"<i>Added by {added_by}</i>\n\n"
 
     try:
         video = message.video
@@ -64,6 +72,7 @@ async def handle_video_message(
                     source_type=SourceType.VIDEO,
                     raw_input=transcription,
                     expense_date=parsed.expense_date,
+                    group_chat_id=group_chat_id,
                 )
 
                 category_name = category.name if category else "Uncategorized"
@@ -73,7 +82,7 @@ async def handle_video_message(
                 currency = parsed.currency or user.default_currency
 
                 await processing_msg.edit_text(
-                    f"Expense recorded:\n\n"
+                    f"{added_by_prefix}Expense recorded:\n\n"
                     f"<b>{currency} {parsed.amount:.2f}</b> - {icon}{category_name}\n"
                     f"{parsed.description}\n"
                     f"{date_str}",
@@ -112,6 +121,7 @@ async def handle_video_message(
                     source_type=SourceType.VIDEO,
                     raw_input="[Video frame]",
                     expense_date=expense_data.expense_date,
+                    group_chat_id=group_chat_id,
                 )
 
                 category_name = category.name if category else "Uncategorized"
@@ -121,7 +131,7 @@ async def handle_video_message(
                 currency = expense_data.currency or user.default_currency
 
                 await processing_msg.edit_text(
-                    f"Expense recorded from video:\n\n"
+                    f"{added_by_prefix}Expense recorded from video:\n\n"
                     f"<b>{currency} {expense_data.amount:.2f}</b> - {icon}{category_name}\n"
                     f"{expense_data.description}\n"
                     f"{date_str}",
@@ -147,6 +157,8 @@ async def handle_video_note(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    is_group: bool = False,
+    group_chat_id: int | None = None,
 ) -> None:
     """Handle video notes (circular videos) for expense parsing."""
     processing_msg = await message.answer("Processing video note...")
@@ -198,6 +210,7 @@ async def handle_video_note(
             source_type=SourceType.VIDEO,
             raw_input=transcription,
             expense_date=parsed.expense_date,
+            group_chat_id=group_chat_id,
         )
 
         category_name = category.name if category else "Uncategorized"
@@ -206,8 +219,14 @@ async def handle_video_note(
         icon = f"{category_icon} " if category_icon else ""
         currency = parsed.currency or user.default_currency
 
+        # Add user attribution in group chats
+        added_by_prefix = ""
+        if is_group:
+            added_by = user.first_name or user.username or "Someone"
+            added_by_prefix = f"<i>Added by {added_by}</i>\n\n"
+
         await processing_msg.edit_text(
-            f"Expense recorded:\n\n"
+            f"{added_by_prefix}Expense recorded:\n\n"
             f"<b>{currency} {parsed.amount:.2f}</b> - {icon}{category_name}\n"
             f"{parsed.description}\n"
             f"{date_str}",

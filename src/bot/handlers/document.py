@@ -28,6 +28,8 @@ async def handle_document_message(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    is_group: bool = False,
+    group_chat_id: int | None = None,
 ) -> None:
     """Handle document messages (PDFs, images sent as files)."""
     document = message.document
@@ -109,6 +111,7 @@ async def handle_document_message(
             source_type=SourceType.DOCUMENT,
             raw_input=f"[Document: {document.file_name or 'unnamed'}]",
             expense_date=expense_data.expense_date,
+            group_chat_id=group_chat_id,
         )
 
         category_name = category.name if category else "Uncategorized"
@@ -118,8 +121,14 @@ async def handle_document_message(
         icon = f"{category_icon} " if category_icon else ""
         currency = expense_data.currency or user.default_currency
 
+        # Add user attribution in group chats
+        added_by_prefix = ""
+        if is_group:
+            added_by = user.first_name or user.username or "Someone"
+            added_by_prefix = f"<i>Added by {added_by}</i>\n\n"
+
         await processing_msg.edit_text(
-            f"Document processed{store_info}:\n\n"
+            f"{added_by_prefix}Document processed{store_info}:\n\n"
             f"<b>{currency} {expense_data.amount:.2f}</b> - {icon}{category_name}\n"
             f"{expense_data.description}\n"
             f"{date_str}",

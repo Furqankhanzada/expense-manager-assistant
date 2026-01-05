@@ -9,9 +9,12 @@ from sqlalchemy import select, func, and_, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+import secrets
+
 from src.database.models import (
     Category,
     Expense,
+    Household,
     LLMConfig,
     SourceType,
     User,
@@ -99,6 +102,113 @@ class UserRepository:
         if user:
             user.default_currency = currency
 
+    async def complete_setup(self, user_id: UUID, currency: str) -> None:
+        """Mark user setup as complete and set currency."""
+        user = await self.get_by_id(user_id)
+        if user:
+            user.default_currency = currency
+            user.is_setup_complete = True
+
+    async def join_household(self, user_id: UUID, household_id: UUID) -> bool:
+        """Add user to a household."""
+        user = await self.get_by_id(user_id)
+        if user:
+            user.household_id = household_id
+            return True
+        return False
+
+    async def leave_household(self, user_id: UUID) -> bool:
+        """Remove user from their household."""
+        user = await self.get_by_id(user_id)
+        if user and user.household_id:
+            user.household_id = None
+            return True
+        return False
+
+
+class HouseholdRepository:
+    """Repository for Household operations."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create(self, name: str, owner_id: UUID) -> Household:
+        """Create a new household."""
+        invite_code = secrets.token_urlsafe(8)[:10].upper()
+
+        household = Household(
+            name=name,
+            owner_id=owner_id,
+            invite_code=invite_code,
+        )
+        self.session.add(household)
+        await self.session.flush()
+        return household
+
+    async def get_by_id(self, household_id: UUID) -> Household | None:
+        """Get household by ID."""
+        result = await self.session.execute(
+            select(Household)
+            .where(Household.id == household_id)
+            .options(selectinload(Household.members))
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_invite_code(self, invite_code: str) -> Household | None:
+        """Get household by invite code."""
+        result = await self.session.execute(
+            select(Household)
+            .where(Household.invite_code == invite_code.upper())
+            .options(selectinload(Household.members))
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_owner(self, owner_id: UUID) -> Household | None:
+        """Get household owned by user."""
+        result = await self.session.execute(
+            select(Household)
+            .where(Household.owner_id == owner_id)
+            .options(selectinload(Household.members))
+        )
+        return result.scalar_one_or_none()
+
+    async def get_members(self, household_id: UUID) -> Sequence[User]:
+        """Get all members of a household."""
+        result = await self.session.execute(
+            select(User).where(User.household_id == household_id)
+        )
+        return result.scalars().all()
+
+    async def get_member_ids(self, household_id: UUID) -> list[UUID]:
+        """Get all member IDs of a household."""
+        result = await self.session.execute(
+            select(User.id).where(User.household_id == household_id)
+        )
+        return [row[0] for row in result.all()]
+
+    async def regenerate_invite_code(self, household_id: UUID) -> str | None:
+        """Generate a new invite code for household."""
+        household = await self.get_by_id(household_id)
+        if household:
+            household.invite_code = secrets.token_urlsafe(8)[:10].upper()
+            return household.invite_code
+        return None
+
+    async def delete(self, household_id: UUID) -> bool:
+        """Delete a household."""
+        # First remove all members from household
+        await self.session.execute(
+            select(User).where(User.household_id == household_id)
+        )
+        members = await self.get_members(household_id)
+        for member in members:
+            member.household_id = None
+
+        result = await self.session.execute(
+            delete(Household).where(Household.id == household_id)
+        )
+        return result.rowcount > 0
+
 
 class CategoryRepository:
     """Repository for Category operations."""
@@ -165,8 +275,14 @@ class ExpenseRepository:
         source_type: SourceType = SourceType.TEXT,
         raw_input: str | None = None,
         expense_date: date | None = None,
+        group_chat_id: int | None = None,
     ) -> Expense:
-        """Create a new expense."""
+        """Create a new expense.
+
+        Args:
+            group_chat_id: If provided, expense is shared in that group.
+                          If None, expense is personal (private chat).
+        """
         expense = Expense(
             user_id=user_id,
             amount=amount,
@@ -176,6 +292,7 @@ class ExpenseRepository:
             source_type=source_type,
             raw_input=raw_input,
             expense_date=expense_date or date.today(),
+            group_chat_id=group_chat_id,
         )
         self.session.add(expense)
         await self.session.flush()
@@ -195,12 +312,29 @@ class ExpenseRepository:
         user_id: UUID,
         limit: int = 50,
         offset: int = 0,
+        group_chat_id: int | None = None,
     ) -> Sequence[Expense]:
-        """Get expenses for a user."""
+        """Get expenses for a user or group.
+
+        Args:
+            user_id: The user's ID
+            group_chat_id: If provided, get all expenses for this group.
+                          If None, get only personal expenses (private chat).
+        """
+        if group_chat_id:
+            # Group context: get all expenses for this group
+            expense_filter = Expense.group_chat_id == group_chat_id
+        else:
+            # Private context: get only personal expenses (no group)
+            expense_filter = and_(
+                Expense.user_id == user_id,
+                Expense.group_chat_id.is_(None),
+            )
+
         result = await self.session.execute(
             select(Expense)
-            .where(Expense.user_id == user_id)
-            .options(selectinload(Expense.category))
+            .where(expense_filter)
+            .options(selectinload(Expense.category), selectinload(Expense.user))
             .order_by(Expense.expense_date.desc(), Expense.created_at.desc())
             .limit(limit)
             .offset(offset)
@@ -212,18 +346,27 @@ class ExpenseRepository:
         user_id: UUID,
         start_date: date,
         end_date: date,
+        group_chat_id: int | None = None,
     ) -> Sequence[Expense]:
         """Get expenses within a date range."""
+        if group_chat_id:
+            expense_filter = Expense.group_chat_id == group_chat_id
+        else:
+            expense_filter = and_(
+                Expense.user_id == user_id,
+                Expense.group_chat_id.is_(None),
+            )
+
         result = await self.session.execute(
             select(Expense)
             .where(
                 and_(
-                    Expense.user_id == user_id,
+                    expense_filter,
                     Expense.expense_date >= start_date,
                     Expense.expense_date <= end_date,
                 )
             )
-            .options(selectinload(Expense.category))
+            .options(selectinload(Expense.category), selectinload(Expense.user))
             .order_by(Expense.expense_date.desc())
         )
         return result.scalars().all()
@@ -233,8 +376,17 @@ class ExpenseRepository:
         user_id: UUID,
         start_date: date,
         end_date: date,
+        group_chat_id: int | None = None,
     ) -> list[tuple[str, Decimal]]:
         """Get total expenses grouped by category."""
+        if group_chat_id:
+            expense_filter = Expense.group_chat_id == group_chat_id
+        else:
+            expense_filter = and_(
+                Expense.user_id == user_id,
+                Expense.group_chat_id.is_(None),
+            )
+
         result = await self.session.execute(
             select(
                 Category.name,
@@ -243,7 +395,7 @@ class ExpenseRepository:
             .join(Category, Expense.category_id == Category.id, isouter=True)
             .where(
                 and_(
-                    Expense.user_id == user_id,
+                    expense_filter,
                     Expense.expense_date >= start_date,
                     Expense.expense_date <= end_date,
                 )
@@ -253,7 +405,13 @@ class ExpenseRepository:
         )
         return [(row[0] or "Uncategorized", row[1]) for row in result.all()]
 
-    async def get_monthly_total(self, user_id: UUID, year: int, month: int) -> Decimal:
+    async def get_monthly_total(
+        self,
+        user_id: UUID,
+        year: int,
+        month: int,
+        group_chat_id: int | None = None,
+    ) -> Decimal:
         """Get total expenses for a specific month."""
         start_date = date(year, month, 1)
         if month == 12:
@@ -261,11 +419,19 @@ class ExpenseRepository:
         else:
             end_date = date(year, month + 1, 1) - timedelta(days=1)
 
+        if group_chat_id:
+            expense_filter = Expense.group_chat_id == group_chat_id
+        else:
+            expense_filter = and_(
+                Expense.user_id == user_id,
+                Expense.group_chat_id.is_(None),
+            )
+
         result = await self.session.execute(
             select(func.coalesce(func.sum(Expense.amount), 0))
             .where(
                 and_(
-                    Expense.user_id == user_id,
+                    expense_filter,
                     Expense.expense_date >= start_date,
                     Expense.expense_date <= end_date,
                 )

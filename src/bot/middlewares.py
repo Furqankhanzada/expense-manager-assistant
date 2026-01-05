@@ -5,12 +5,40 @@ from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
 from aiogram.types import Message, CallbackQuery, TelegramObject
+from aiogram.enums import ChatType
 
 from src.database.connection import get_session
 from src.database.repository import UserRepository, LLMConfigRepository
 from src.llm.provider import LLMProvider, get_provider_for_user
 
 logger = logging.getLogger(__name__)
+
+
+class ChatContextMiddleware(BaseMiddleware):
+    """Middleware that provides chat context (private vs group) to handlers."""
+
+    async def __call__(
+        self,
+        handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
+        event: TelegramObject,
+        data: dict[str, Any],
+    ) -> Any:
+        """Inject chat context into handler data."""
+        chat = None
+        if isinstance(event, Message):
+            chat = event.chat
+        elif isinstance(event, CallbackQuery) and event.message:
+            chat = event.message.chat
+
+        # Determine if this is a group chat
+        is_group = chat and chat.type in (ChatType.GROUP, ChatType.SUPERGROUP)
+
+        # Pass context to handlers
+        data["is_group"] = is_group
+        data["group_chat_id"] = chat.id if is_group else None
+        data["chat_title"] = chat.title if is_group and chat.title else None
+
+        return await handler(event, data)
 
 
 class DatabaseMiddleware(BaseMiddleware):

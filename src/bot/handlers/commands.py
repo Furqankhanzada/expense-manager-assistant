@@ -24,6 +24,7 @@ from src.bot.keyboards import (
     llm_provider_keyboard,
     report_period_keyboard,
     settings_keyboard,
+    setup_currency_keyboard,
 )
 from src.database.models import User
 from src.database.repository import (
@@ -40,16 +41,28 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+
+
 @router.message(CommandStart())
-async def cmd_start(message: Message, user: User) -> None:
+async def cmd_start(message: Message, session: AsyncSession, user: User) -> None:
     """Handle /start command."""
+    # Check if user needs initial setup
+    if not user.is_setup_complete:
+        await message.answer(
+            f"Welcome to Expense Manager Bot!\n\n"
+            f"Let's get you set up. First, select your default currency:",
+            reply_markup=setup_currency_keyboard(),
+        )
+        return
+
     await message.answer(
-        f"Welcome to Expense Manager Bot!\n\n"
+        f"Welcome back!\n\n"
         f"I'll help you track your expenses using AI. Just send me:\n\n"
         f"<b>Text:</b> \"Spent $25 on lunch\"\n"
         f"<b>Voice:</b> Record a voice message describing your expense\n"
         f"<b>Photo:</b> Send a photo of a receipt\n"
         f"<b>Video:</b> Record a video note about your purchase\n\n"
+        f"<b>Group Sharing:</b> Add me to a group to share expenses with family!\n\n"
         f"<b>Commands:</b>\n"
         f"/report - View spending reports\n"
         f"/categories - Manage expense categories\n"
@@ -59,9 +72,37 @@ async def cmd_start(message: Message, user: User) -> None:
     )
 
 
+@router.callback_query(F.data.startswith("setup:currency:"))
+async def handle_setup_currency(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    user: User,
+) -> None:
+    """Handle initial currency setup."""
+    currency = callback.data.split(":")[2]
+
+    user_repo = UserRepository(session)
+    await user_repo.complete_setup(user.id, currency)
+
+    await callback.answer("Setup complete!")
+    await callback.message.edit_text(
+        f"Currency set to <b>{currency}</b>.\n\n"
+        f"You're all set! Now you can:\n\n"
+        f"- Send text like \"Spent $25 on lunch\"\n"
+        f"- Send voice messages describing expenses\n"
+        f"- Send photos of receipts\n\n"
+        f"<b>Tip:</b> Add me to a group to share expenses with family!\n"
+        f"Use /help for more options.",
+    )
+
+
 @router.message(Command("help"))
-async def cmd_help(message: Message) -> None:
+async def cmd_help(message: Message, is_group: bool = False) -> None:
     """Handle /help command."""
+    group_info = ""
+    if is_group:
+        group_info = "\n<b>Group Mode:</b> All expenses here are shared with group members.\n"
+
     await message.answer(
         "<b>Expense Manager Bot Help</b>\n\n"
         "<b>Track Expenses:</b>\n"
@@ -71,6 +112,11 @@ async def cmd_help(message: Message) -> None:
         "- \"Spent 50 euros on groceries yesterday\"\n"
         "- Send a receipt photo\n"
         "- Voice: \"Just paid thirty bucks for gas\"\n\n"
+        f"{group_info}"
+        "<b>Sharing:</b>\n"
+        "Add me to a Telegram group to share expenses with family!\n"
+        "In private chat: personal expenses only.\n"
+        "In groups: all members share the same expense pool.\n\n"
         "<b>Commands:</b>\n"
         "/start - Welcome message\n"
         "/report - Generate spending reports\n"
@@ -80,6 +126,8 @@ async def cmd_help(message: Message) -> None:
         "/help - This help message"
     )
 
+
+# ============ Report Commands ============
 
 @router.message(Command("report"))
 async def cmd_report(message: Message) -> None:
@@ -96,6 +144,8 @@ async def handle_report_callback(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    is_group: bool = False,
+    group_chat_id: int | None = None,
 ) -> None:
     """Handle report period selection."""
     period = callback.data.split(":")[1]
@@ -125,9 +175,12 @@ async def handle_report_callback(
     await callback.message.edit_text(f"Generating {period_name} report...")
 
     expense_repo = ExpenseRepository(session)
-
-    expenses = await expense_repo.get_by_date_range(user.id, start_date, end_date)
-    category_totals = await expense_repo.get_total_by_category(user.id, start_date, end_date)
+    expenses = await expense_repo.get_by_date_range(
+        user.id, start_date, end_date, group_chat_id=group_chat_id
+    )
+    category_totals = await expense_repo.get_total_by_category(
+        user.id, start_date, end_date, group_chat_id=group_chat_id
+    )
 
     report = await generate_expense_report(
         expenses=expenses,
@@ -138,11 +191,14 @@ async def handle_report_callback(
         llm=llm,
     )
 
+    group_note = " (Group)" if is_group else ""
     await callback.message.edit_text(
-        f"<b>{period_name} Report</b>\n\n{report}",
+        f"<b>{period_name} Report{group_note}</b>\n\n{report}",
         reply_markup=None,
     )
 
+
+# ============ Settings Commands ============
 
 @router.message(Command("categories"))
 async def cmd_categories(
@@ -201,7 +257,6 @@ async def handle_llm_selection(
 
     llm_repo = LLMConfigRepository(session)
 
-    # Default models for each provider
     models = {
         "openai": "gpt-4o-mini",
         "gemini": "gemini-1.5-flash",
@@ -264,6 +319,8 @@ async def handle_settings_back(callback: CallbackQuery, user: User) -> None:
     )
 
 
+# ============ Export Commands ============
+
 @router.message(Command("export"))
 async def cmd_export(message: Message) -> None:
     """Handle /export command."""
@@ -278,6 +335,8 @@ async def handle_export(
     callback: CallbackQuery,
     session: AsyncSession,
     user: User,
+    is_group: bool = False,
+    group_chat_id: int | None = None,
 ) -> None:
     """Handle export format selection."""
     format_type = callback.data.split(":")[1]
@@ -286,7 +345,9 @@ async def handle_export(
     await callback.message.edit_text("Preparing export...")
 
     expense_repo = ExpenseRepository(session)
-    expenses = await expense_repo.get_by_user(user.id, limit=10000)
+    expenses = await expense_repo.get_by_user(
+        user.id, limit=10000, group_chat_id=group_chat_id
+    )
 
     if not expenses:
         await callback.message.edit_text("No expenses to export.")
@@ -295,9 +356,13 @@ async def handle_export(
     if format_type == "csv":
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["Date", "Amount", "Currency", "Category", "Description", "Source"])
+        writer.writerow(["Date", "Amount", "Currency", "Category", "Description", "Source", "Added By"])
 
         for exp in expenses:
+            added_by = ""
+            if hasattr(exp, 'user') and exp.user:
+                added_by = exp.user.first_name or exp.user.username or ""
+
             writer.writerow([
                 exp.expense_date.isoformat(),
                 str(exp.amount),
@@ -305,15 +370,19 @@ async def handle_export(
                 exp.category.name if exp.category else "Uncategorized",
                 exp.description or "",
                 exp.source_type.value,
+                added_by,
             ])
 
         file_data = output.getvalue().encode("utf-8")
         filename = f"expenses_{date.today().isoformat()}.csv"
-        mime_type = "text/csv"
 
     else:  # JSON
         data = []
         for exp in expenses:
+            added_by = ""
+            if hasattr(exp, 'user') and exp.user:
+                added_by = exp.user.first_name or exp.user.username or ""
+
             data.append({
                 "date": exp.expense_date.isoformat(),
                 "amount": float(exp.amount),
@@ -321,12 +390,12 @@ async def handle_export(
                 "category": exp.category.name if exp.category else None,
                 "description": exp.description,
                 "source_type": exp.source_type.value,
+                "added_by": added_by,
                 "created_at": exp.created_at.isoformat(),
             })
 
         file_data = json.dumps(data, indent=2).encode("utf-8")
         filename = f"expenses_{date.today().isoformat()}.json"
-        mime_type = "application/json"
 
     await callback.message.delete()
     await callback.message.answer_document(
@@ -335,7 +404,8 @@ async def handle_export(
     )
 
 
-# Expense action callbacks
+# ============ Expense Action Callbacks ============
+
 @router.callback_query(F.data.startswith("expense:delete:"))
 async def handle_expense_delete_prompt(callback: CallbackQuery) -> None:
     """Prompt for expense deletion confirmation."""

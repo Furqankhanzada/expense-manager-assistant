@@ -25,6 +25,8 @@ async def handle_voice_message(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    is_group: bool = False,
+    group_chat_id: int | None = None,
 ) -> None:
     """Handle voice messages and parse them as expenses."""
     # Send processing indicator
@@ -87,6 +89,7 @@ async def handle_voice_message(
             source_type=SourceType.VOICE,
             raw_input=transcription,
             expense_date=parsed.expense_date,
+            group_chat_id=group_chat_id,
         )
 
         date_str = parsed.expense_date.strftime("%b %d, %Y")
@@ -94,8 +97,14 @@ async def handle_voice_message(
         icon = f"{category_icon} " if category_icon else ""
         currency = parsed.currency or user.default_currency
 
+        # Add user attribution in group chats
+        added_by_prefix = ""
+        if is_group:
+            added_by = user.first_name or user.username or "Someone"
+            added_by_prefix = f"<i>Added by {added_by}</i>\n\n"
+
         await processing_msg.edit_text(
-            f"Expense recorded:\n\n"
+            f"{added_by_prefix}Expense recorded:\n\n"
             f"<b>{currency} {parsed.amount:.2f}</b> - {icon}{category_name}\n"
             f"{parsed.description}\n"
             f"{date_str}",
@@ -115,6 +124,8 @@ async def handle_audio_message(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    is_group: bool = False,
+    group_chat_id: int | None = None,
 ) -> None:
     """Handle audio file messages."""
     processing_msg = await message.answer("Processing audio...")
@@ -171,14 +182,21 @@ async def handle_audio_message(
             source_type=SourceType.VOICE,
             raw_input=transcription,
             expense_date=parsed.expense_date,
+            group_chat_id=group_chat_id,
         )
 
         date_str = parsed.expense_date.strftime("%b %d, %Y")
         icon = f"{category_icon} " if category_icon else ""
         currency = parsed.currency or user.default_currency
 
+        # Add user attribution in group chats
+        added_by_prefix = ""
+        if is_group:
+            added_by = user.first_name or user.username or "Someone"
+            added_by_prefix = f"<i>Added by {added_by}</i>\n\n"
+
         await processing_msg.edit_text(
-            f"Expense recorded:\n\n"
+            f"{added_by_prefix}Expense recorded:\n\n"
             f"<b>{currency} {parsed.amount:.2f}</b> - {icon}{category_name}\n"
             f"{parsed.description}\n"
             f"{date_str}",

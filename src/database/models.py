@@ -38,6 +38,13 @@ class SourceType(enum.Enum):
     DOCUMENT = "document"
 
 
+class MemberRole(enum.Enum):
+    """Role of a household member."""
+
+    OWNER = "owner"
+    MEMBER = "member"
+
+
 class User(Base):
     """User model representing Telegram users."""
 
@@ -54,6 +61,13 @@ class User(Base):
     last_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     default_currency: Mapped[str] = mapped_column(String(10), default="USD")
     timezone: Mapped[str] = mapped_column(String(50), default="UTC")
+    is_setup_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    household_id: Mapped[Optional[UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("households.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -65,6 +79,11 @@ class User(Base):
     )
 
     # Relationships
+    household: Mapped[Optional["Household"]] = relationship(
+        "Household",
+        back_populates="members",
+        foreign_keys=[household_id],
+    )
     categories: Mapped[list["Category"]] = relationship(
         "Category",
         back_populates="user",
@@ -79,6 +98,35 @@ class User(Base):
         "LLMConfig",
         back_populates="user",
         cascade="all, delete-orphan",
+    )
+
+
+class Household(Base):
+    """Household for family expense sharing."""
+
+    __tablename__ = "households"
+
+    id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    invite_code: Mapped[str] = mapped_column(String(20), unique=True, nullable=False, index=True)
+    owner_id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # Relationships
+    members: Mapped[list["User"]] = relationship(
+        "User",
+        back_populates="household",
+        foreign_keys=[User.household_id],
     )
 
 
@@ -133,6 +181,12 @@ class Expense(Base):
     category_id: Mapped[Optional[UUID]] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("categories.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # Group chat ID for shared expenses (null = personal expense in private chat)
+    group_chat_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger,
         nullable=True,
         index=True,
     )
