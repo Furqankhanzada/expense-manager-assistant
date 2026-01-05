@@ -111,17 +111,34 @@ async def parse_expense(
         return None
 
 
-RECEIPT_PARSE_PROMPT = """You are a receipt parsing assistant. Analyze this receipt image and extract expense information.
+@dataclass
+class ParsedLineItem:
+    """Individual line item from a receipt."""
+
+    name: str
+    quantity: Decimal
+    unit_price: Decimal
+    total_price: Decimal
+
+
+RECEIPT_PARSE_PROMPT = """You are a receipt parsing assistant. Analyze this receipt image and extract ALL information.
 
 Return a JSON object with:
-- expenses: array of expense objects, each with:
-  - amount: number (required) - the item/total amount
-  - currency: string - currency code (USD, EUR, etc.)
-  - description: string - item description or "Total" for receipt total
+- line_items: array of individual items from the receipt, each with:
+  - name: string - product/item name as shown on receipt
+  - quantity: number - quantity purchased (default 1)
+  - unit_price: number - price per unit
+  - total_price: number - total price for this item (quantity * unit_price)
+- expenses: array containing ONE expense object for the total:
+  - amount: number - the total amount
+  - currency: string - currency code (USD, EUR, PKR, etc.)
+  - description: string - "Total" or brief description
   - category: string - suggest from: Food & Dining, Transportation, Shopping, Entertainment, Bills & Utilities, Health, Travel, Education, Groceries, Other
 - store_name: string (optional) - name of the store/merchant
 - date: string (optional) - receipt date in YYYY-MM-DD format
-- total: number (optional) - total amount on receipt
+- total: number - total amount on receipt
+
+IMPORTANT: Extract ALL individual line items visible on the receipt. This includes product names, quantities, and prices.
 
 If the image is not a receipt or no expenses can be extracted, return: {{"error": "Could not parse receipt"}}
 
@@ -135,6 +152,7 @@ class ParsedReceipt:
     expenses: list[ParsedExpense]
     store_name: str | None
     total: Decimal | None
+    line_items: list[ParsedLineItem] | None = None
 
 
 async def parse_receipt_image(
@@ -151,7 +169,7 @@ async def parse_receipt_image(
             image_data=image_data,
             image_type=image_type,
             temperature=0.1,
-            max_tokens=1000,
+            max_tokens=2000,  # Increased for line items
         )
 
         # Clean up response
@@ -190,10 +208,27 @@ async def parse_receipt_image(
                 )
             )
 
+        # Parse line items
+        line_items = []
+        for item in data.get("line_items", []):
+            try:
+                line_items.append(
+                    ParsedLineItem(
+                        name=item.get("name", "Unknown item"),
+                        quantity=Decimal(str(item.get("quantity", 1))),
+                        unit_price=Decimal(str(item.get("unit_price", 0))),
+                        total_price=Decimal(str(item.get("total_price", 0))),
+                    )
+                )
+            except (ValueError, KeyError) as e:
+                logger.warning(f"Skipping invalid line item: {e}")
+                continue
+
         return ParsedReceipt(
             expenses=expenses,
             store_name=data.get("store_name"),
             total=Decimal(str(data["total"])) if data.get("total") else None,
+            line_items=line_items if line_items else None,
         )
 
     except json.JSONDecodeError as e:

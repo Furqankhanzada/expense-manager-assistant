@@ -212,6 +212,41 @@ class Expense(Base):
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="expenses")
     category: Mapped[Optional["Category"]] = relationship("Category", back_populates="expenses")
+    items: Mapped[list["ExpenseItem"]] = relationship(
+        "ExpenseItem",
+        back_populates="expense",
+        cascade="all, delete-orphan",
+    )
+
+
+class ExpenseItem(Base):
+    """Individual line items from receipts/invoices."""
+
+    __tablename__ = "expense_items"
+
+    id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid4,
+    )
+    expense_id: Mapped[UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("expenses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    name_normalized: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(10, 3), default=1)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    total_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    # Relationships
+    expense: Mapped["Expense"] = relationship("Expense", back_populates="items")
 
 
 class LLMConfig(Base):

@@ -3,6 +3,7 @@
 import logging
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,6 +29,7 @@ async def handle_document_message(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    state: FSMContext,
     is_group: bool = False,
     group_chat_id: int | None = None,
 ) -> None:
@@ -120,6 +122,17 @@ async def handle_document_message(
         store_info = f" at {result.store_name}" if result.store_name else ""
         icon = f"{category_icon} " if category_icon else ""
         currency = expense_data.currency or user.default_currency
+
+        # Store expense context for potential corrections
+        expense_context = {
+            "expense_id": str(expense.id),
+            "amount": str(expense_data.amount),
+            "currency": currency,
+            "description": expense_data.description,
+            "category_name": category_name,
+            "category_id": str(category.id) if category else None,
+        }
+        await state.update_data(last_expense=expense_context)
 
         # Add user attribution in group chats
         added_by_prefix = ""

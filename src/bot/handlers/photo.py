@@ -5,14 +5,15 @@ import uuid
 from dataclasses import dataclass
 
 from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.bot.keyboards import expense_confirmation_keyboard, receipt_confirmation_keyboard
 from src.database.models import SourceType, User
-from src.database.repository import CategoryRepository, ExpenseRepository
+from src.database.repository import CategoryRepository, ExpenseItemRepository, ExpenseRepository
 from src.llm.categorizer import categorize_expense
-from src.llm.expense_parser import ParsedExpense
+from src.llm.expense_parser import ParsedExpense, ParsedLineItem
 from src.llm.provider import LLMProvider
 from src.media.vision import process_receipt_image
 
@@ -25,6 +26,7 @@ router = Router()
 class PendingReceipt:
     """Pending receipt data with context."""
     expenses: list[ParsedExpense]
+    line_items: list[ParsedLineItem] | None = None
     group_chat_id: int | None = None
 
 
@@ -38,6 +40,7 @@ async def handle_photo_message(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    state: FSMContext,
     is_group: bool = False,
     group_chat_id: int | None = None,
 ) -> None:
@@ -96,6 +99,22 @@ async def handle_photo_message(
                 group_chat_id=group_chat_id,
             )
 
+            # Save line items if available
+            items_count = 0
+            if result.line_items:
+                item_repo = ExpenseItemRepository(session)
+                items_data = [
+                    {
+                        "name": item.name,
+                        "quantity": item.quantity,
+                        "unit_price": item.unit_price,
+                        "total_price": item.total_price,
+                    }
+                    for item in result.line_items
+                ]
+                await item_repo.create_bulk(expense.id, items_data)
+                items_count = len(result.line_items)
+
             category_name = category.name if category else "Uncategorized"
             category_icon = category.icon if category else ""
             date_str = expense_data.expense_date.strftime("%b %d, %Y")
@@ -103,12 +122,24 @@ async def handle_photo_message(
             store_info = f" ({result.store_name})" if result.store_name else ""
             icon = f"{category_icon} " if category_icon else ""
             currency = expense_data.currency or user.default_currency
+            items_info = f"\n({items_count} items saved)" if items_count > 0 else ""
+
+            # Store expense context for potential corrections
+            expense_context = {
+                "expense_id": str(expense.id),
+                "amount": str(expense_data.amount),
+                "currency": currency,
+                "description": expense_data.description,
+                "category_name": category_name,
+                "category_id": str(category.id) if category else None,
+            }
+            await state.update_data(last_expense=expense_context)
 
             await processing_msg.edit_text(
                 f"{added_by_prefix}Receipt processed{store_info}:\n\n"
                 f"<b>{currency} {expense_data.amount:.2f}</b> - {icon}{category_name}\n"
                 f"{expense_data.description}\n"
-                f"{date_str}",
+                f"{date_str}{items_info}",
                 reply_markup=expense_confirmation_keyboard(expense.id),
             )
             return
@@ -117,6 +148,7 @@ async def handle_photo_message(
         confirm_id = str(uuid.uuid4())[:8]
         _pending_receipts[confirm_id] = PendingReceipt(
             expenses=result.expenses,
+            line_items=result.line_items,
             group_chat_id=group_chat_id,
         )
 
@@ -149,6 +181,7 @@ async def handle_receipt_confirm(
     session: AsyncSession,
     user: User,
     llm: LLMProvider,
+    state: FSMContext,
 ) -> None:
     """Confirm and save all receipt expenses."""
     confirm_id = callback.data.split(":")[2]
@@ -163,9 +196,11 @@ async def handle_receipt_confirm(
 
     cat_repo = CategoryRepository(session)
     expense_repo = ExpenseRepository(session)
+    item_repo = ExpenseItemRepository(session)
     categories = await cat_repo.get_by_user(user.id)
 
     saved_count = 0
+    first_expense_id = None
     for expense_data in pending.expenses:
         category = None
         if expense_data.category:
@@ -173,7 +208,7 @@ async def handle_receipt_confirm(
         if not category and expense_data.description:
             category, _ = await categorize_expense(expense_data.description, categories, llm)
 
-        await expense_repo.create(
+        expense = await expense_repo.create(
             user_id=user.id,
             amount=expense_data.amount,
             currency=expense_data.currency or user.default_currency,
@@ -184,14 +219,45 @@ async def handle_receipt_confirm(
             expense_date=expense_data.expense_date,
             group_chat_id=pending.group_chat_id,
         )
+        if first_expense_id is None:
+            first_expense_id = expense.id
         saved_count += 1
+
+    # Save line items to first expense (the total)
+    items_count = 0
+    if pending.line_items and first_expense_id:
+        items_data = [
+            {
+                "name": item.name,
+                "quantity": item.quantity,
+                "unit_price": item.unit_price,
+                "total_price": item.total_price,
+            }
+            for item in pending.line_items
+        ]
+        await item_repo.create_bulk(first_expense_id, items_data)
+        items_count = len(pending.line_items)
 
     total = sum(e.amount for e in pending.expenses)
     currency = pending.expenses[0].currency if pending.expenses else user.default_currency
+    items_info = f"\n({items_count} items saved)" if items_count > 0 else ""
+
+    # Store first expense context for potential corrections
+    if pending.expenses and first_expense_id:
+        first_exp = pending.expenses[0]
+        expense_context = {
+            "expense_id": str(first_expense_id),
+            "amount": str(total),
+            "currency": currency,
+            "description": first_exp.description,
+            "category_name": first_exp.category or "Uncategorized",
+            "category_id": None,
+        }
+        await state.update_data(last_expense=expense_context)
 
     await callback.message.edit_text(
         f"Saved {saved_count} expenses from receipt.\n"
-        f"Total: <b>{currency} {total:.2f}</b>",
+        f"Total: <b>{currency} {total:.2f}</b>{items_info}",
         reply_markup=None,
     )
 

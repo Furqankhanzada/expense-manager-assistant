@@ -13,8 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.bot.keyboards import expense_confirmation_keyboard
 from src.database.models import SourceType, User
-from src.database.repository import CategoryRepository, ExpenseRepository
-from src.llm.categorizer import categorize_expense, understand_correction
+from src.database.repository import CategoryRepository, ExpenseItemRepository, ExpenseRepository
+from src.llm.categorizer import (
+    categorize_expense,
+    parse_query,
+    QueryType,
+    understand_correction,
+)
 from src.llm.expense_parser import parse_expense
 from src.llm.provider import LLMProvider
 
@@ -75,6 +80,247 @@ def format_update_message(
     )
 
 
+async def handle_item_price_query(
+    message: Message,
+    session: AsyncSession,
+    user: User,
+    item_name: str,
+    group_chat_id: int | None = None,
+) -> bool:
+    """Handle item price queries like 'how much was milk?'"""
+    item_repo = ExpenseItemRepository(session)
+    result = await item_repo.get_latest_price(user.id, item_name, group_chat_id)
+
+    if not result:
+        await message.answer(
+            f"I couldn't find any purchases of '{item_name}' in your history."
+        )
+        return True
+
+    item, expense = result
+    date_str = expense.expense_date.strftime("%b %d, %Y")
+
+    await message.answer(
+        f"<b>{item.name}</b>\n\n"
+        f"Last purchased: {date_str}\n"
+        f"Price: <b>{expense.currency} {item.total_price:.2f}</b>\n"
+        f"Quantity: {item.quantity}"
+    )
+    return True
+
+
+async def handle_category_spending_query(
+    message: Message,
+    session: AsyncSession,
+    user: User,
+    category_hint: str,
+    start_date,
+    end_date,
+    group_chat_id: int | None = None,
+) -> bool:
+    """Handle category spending queries like 'how much on petrol last month?'"""
+    from datetime import date as date_type
+    from datetime import timedelta
+
+    # Default to this month if no dates
+    if not start_date:
+        today = date_type.today()
+        start_date = today.replace(day=1)
+    if not end_date:
+        end_date = date_type.today()
+
+    expense_repo = ExpenseRepository(session)
+    total, expenses = await expense_repo.get_spending_by_category_name(
+        user.id, category_hint, start_date, end_date, group_chat_id
+    )
+
+    if not expenses:
+        await message.answer(
+            f"No spending found for '{category_hint}' "
+            f"between {start_date.strftime('%b %d')} and {end_date.strftime('%b %d, %Y')}."
+        )
+        return True
+
+    # Format period
+    if start_date == end_date:
+        period_str = start_date.strftime("%b %d, %Y")
+    else:
+        period_str = f"{start_date.strftime('%b %d')} - {end_date.strftime('%b %d, %Y')}"
+
+    # Build response
+    currency = expenses[0].currency if expenses else user.default_currency
+    lines = [f"<b>Spending on '{category_hint}'</b>"]
+    lines.append(f"Period: {period_str}\n")
+
+    # Show individual expenses (max 5)
+    for exp in expenses[:5]:
+        cat_name = exp.category.name if exp.category else "Uncategorized"
+        lines.append(f"• {exp.expense_date.strftime('%b %d')}: {currency} {exp.amount:.2f} - {exp.description or cat_name}")
+
+    if len(expenses) > 5:
+        lines.append(f"... and {len(expenses) - 5} more")
+
+    lines.append(f"\n<b>Total: {currency} {total:.2f}</b> ({len(expenses)} transactions)")
+
+    await message.answer("\n".join(lines))
+    return True
+
+
+def extract_expense_id_from_reply(message: Message) -> str | None:
+    """Extract expense ID from a replied message's inline keyboard."""
+    if not message.reply_to_message:
+        return None
+
+    reply = message.reply_to_message
+    if not reply.reply_markup or not reply.reply_markup.inline_keyboard:
+        return None
+
+    # Look through the keyboard buttons for expense ID
+    for row in reply.reply_markup.inline_keyboard:
+        for button in row:
+            if button.callback_data:
+                # Patterns: expense:delete:{id}, expense:category:{id}, delete:confirm:{id}
+                parts = button.callback_data.split(":")
+                if len(parts) >= 3 and parts[0] in ("expense", "delete"):
+                    return parts[2]
+
+    return None
+
+
+async def handle_date_spending_query(
+    message: Message,
+    session: AsyncSession,
+    user: User,
+    start_date,
+    end_date,
+    group_chat_id: int | None = None,
+) -> bool:
+    """Handle date spending queries like 'how much yesterday?'"""
+    from datetime import date as date_type
+
+    if not start_date:
+        start_date = date_type.today()
+    if not end_date:
+        end_date = start_date
+
+    expense_repo = ExpenseRepository(session)
+
+    # For single day, use specific date query
+    if start_date == end_date:
+        total, expenses = await expense_repo.get_spending_by_date(
+            user.id, start_date, group_chat_id
+        )
+        period_str = start_date.strftime("%B %d, %Y")
+    else:
+        # For date range, use date range query
+        expenses = list(await expense_repo.get_by_date_range(
+            user.id, start_date, end_date, group_chat_id
+        ))
+        total = sum(exp.amount for exp in expenses)
+        period_str = f"{start_date.strftime('%b %d')} - {end_date.strftime('%b %d, %Y')}"
+
+    if not expenses:
+        await message.answer(f"No expenses found for {period_str}.")
+        return True
+
+    currency = expenses[0].currency if expenses else user.default_currency
+
+    lines = [f"<b>Spending: {period_str}</b>\n"]
+
+    # Group by category
+    category_totals: dict[str, Decimal] = {}
+    for exp in expenses:
+        cat_name = exp.category.name if exp.category else "Uncategorized"
+        category_totals[cat_name] = category_totals.get(cat_name, Decimal(0)) + exp.amount
+
+    # Show category breakdown
+    for cat_name, cat_total in sorted(category_totals.items(), key=lambda x: x[1], reverse=True):
+        lines.append(f"• {cat_name}: {currency} {cat_total:.2f}")
+
+    lines.append(f"\n<b>Total: {currency} {total:.2f}</b> ({len(expenses)} transactions)")
+
+    await message.answer("\n".join(lines))
+    return True
+
+
+async def handle_list_expenses_query(
+    message: Message,
+    session: AsyncSession,
+    user: User,
+    start_date,
+    end_date,
+    category_hint: str | None = None,
+    group_chat_id: int | None = None,
+) -> bool:
+    """Handle list expenses queries like 'list today's expenses'."""
+    from datetime import date as date_type
+
+    if not start_date:
+        start_date = date_type.today()
+    if not end_date:
+        end_date = start_date
+
+    expense_repo = ExpenseRepository(session)
+
+    # Get expenses for the period
+    if category_hint:
+        # Filter by category if specified
+        total, expenses = await expense_repo.get_spending_by_category_name(
+            user.id, category_hint, start_date, end_date, group_chat_id
+        )
+    else:
+        if start_date == end_date:
+            total, expenses = await expense_repo.get_spending_by_date(
+                user.id, start_date, group_chat_id
+            )
+        else:
+            expenses = list(await expense_repo.get_by_date_range(
+                user.id, start_date, end_date, group_chat_id
+            ))
+            total = sum(exp.amount for exp in expenses)
+
+    # Format period string
+    if start_date == end_date:
+        period_str = start_date.strftime("%B %d, %Y")
+    else:
+        period_str = f"{start_date.strftime('%b %d')} - {end_date.strftime('%b %d, %Y')}"
+
+    if not expenses:
+        await message.answer(f"No expenses found for {period_str}.")
+        return True
+
+    currency = expenses[0].currency if expenses else user.default_currency
+
+    # Build detailed list
+    category_filter = f" ({category_hint})" if category_hint else ""
+    lines = [f"<b>Expenses: {period_str}{category_filter}</b>\n"]
+
+    for i, exp in enumerate(expenses[:15], 1):  # Limit to 15 to avoid message too long
+        cat_icon = exp.category.icon if exp.category else "📦"
+        cat_name = exp.category.name if exp.category else "Uncategorized"
+        time_str = exp.created_at.strftime("%I:%M %p") if exp.created_at else ""
+        date_prefix = ""
+
+        # Show date if range spans multiple days
+        if start_date != end_date:
+            date_prefix = f"{exp.expense_date.strftime('%b %d')} "
+
+        description = exp.description or cat_name
+        lines.append(
+            f"{i}. {date_prefix}{time_str}\n"
+            f"   <b>{currency} {exp.amount:.2f}</b> - {cat_icon} {cat_name}\n"
+            f"   {description}"
+        )
+
+    if len(expenses) > 15:
+        lines.append(f"\n... and {len(expenses) - 15} more expenses")
+
+    lines.append(f"\n<b>Total: {currency} {total:.2f}</b> ({len(expenses)} expenses)")
+
+    await message.answer("\n".join(lines))
+    return True
+
+
 @router.message(F.text)
 async def handle_text_message(
     message: Message,
@@ -95,13 +341,64 @@ async def handle_text_message(
     if text.startswith("/"):
         return
 
+    # First, check if this is a query about expenses
+    query = await parse_query(text, llm)
+
+    if query.is_valid:
+        if query.query_type == QueryType.ITEM_PRICE and query.item_name:
+            await handle_item_price_query(
+                message, session, user, query.item_name, group_chat_id
+            )
+            return
+        elif query.query_type == QueryType.CATEGORY_SPENDING and query.category_hint:
+            await handle_category_spending_query(
+                message, session, user,
+                query.category_hint, query.start_date, query.end_date,
+                group_chat_id
+            )
+            return
+        elif query.query_type == QueryType.DATE_SPENDING:
+            await handle_date_spending_query(
+                message, session, user,
+                query.start_date, query.end_date,
+                group_chat_id
+            )
+            return
+        elif query.query_type == QueryType.LIST_EXPENSES:
+            await handle_list_expenses_query(
+                message, session, user,
+                query.start_date, query.end_date,
+                query.category_hint,
+                group_chat_id
+            )
+            return
+
     # Parse expense from text
     parsed = await parse_expense(text, llm)
 
     if not parsed:
-        # Check if this might be a correction to the last expense
-        state_data = await state.get_data()
-        last_expense = state_data.get("last_expense")
+        # Check if this is a reply to an expense message (for corrections)
+        reply_expense_id = extract_expense_id_from_reply(message)
+
+        # Get expense context - either from reply or from state
+        last_expense = None
+        if reply_expense_id:
+            # Load expense from database for reply-based correction
+            expense_repo = ExpenseRepository(session)
+            replied_expense = await expense_repo.get_by_id(UUID(reply_expense_id))
+            if replied_expense:
+                last_expense = {
+                    "expense_id": str(replied_expense.id),
+                    "amount": str(replied_expense.amount),
+                    "currency": replied_expense.currency,
+                    "description": replied_expense.description or "",
+                    "category_name": replied_expense.category.name if replied_expense.category else "Uncategorized",
+                    "category_id": str(replied_expense.category.id) if replied_expense.category else None,
+                }
+        else:
+            # Fall back to state-based last expense
+            state_data = await state.get_data()
+            last_expense = state_data.get("last_expense")
 
         if last_expense:
             # Try to understand if this is a correction

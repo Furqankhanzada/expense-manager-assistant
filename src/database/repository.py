@@ -14,6 +14,7 @@ import secrets
 from src.database.models import (
     Category,
     Expense,
+    ExpenseItem,
     Household,
     LLMConfig,
     SourceType,
@@ -466,6 +467,146 @@ class ExpenseRepository:
             delete(Expense).where(Expense.id == expense_id)
         )
         return result.rowcount > 0
+
+    async def get_spending_by_category_name(
+        self,
+        user_id: UUID,
+        category_name: str,
+        start_date: date,
+        end_date: date,
+        group_chat_id: int | None = None,
+    ) -> tuple[Decimal, list[Expense]]:
+        """Get total spending and expenses for a specific category name in date range."""
+        if group_chat_id:
+            expense_filter = Expense.group_chat_id == group_chat_id
+        else:
+            expense_filter = and_(
+                Expense.user_id == user_id,
+                Expense.group_chat_id.is_(None),
+            )
+
+        result = await self.session.execute(
+            select(Expense)
+            .join(Category, Expense.category_id == Category.id, isouter=True)
+            .where(
+                and_(
+                    expense_filter,
+                    Expense.expense_date >= start_date,
+                    Expense.expense_date <= end_date,
+                    func.lower(Category.name).contains(func.lower(category_name)),
+                )
+            )
+            .options(selectinload(Expense.category), selectinload(Expense.items))
+            .order_by(Expense.expense_date.desc())
+        )
+        expenses = list(result.scalars().all())
+        total = sum(exp.amount for exp in expenses)
+        return total, expenses
+
+    async def get_spending_by_date(
+        self,
+        user_id: UUID,
+        target_date: date,
+        group_chat_id: int | None = None,
+    ) -> tuple[Decimal, list[Expense]]:
+        """Get total spending and expenses for a specific date."""
+        if group_chat_id:
+            expense_filter = Expense.group_chat_id == group_chat_id
+        else:
+            expense_filter = and_(
+                Expense.user_id == user_id,
+                Expense.group_chat_id.is_(None),
+            )
+
+        result = await self.session.execute(
+            select(Expense)
+            .where(
+                and_(
+                    expense_filter,
+                    Expense.expense_date == target_date,
+                )
+            )
+            .options(selectinload(Expense.category), selectinload(Expense.items))
+            .order_by(Expense.created_at.desc())
+        )
+        expenses = list(result.scalars().all())
+        total = sum(exp.amount for exp in expenses)
+        return total, expenses
+
+
+class ExpenseItemRepository:
+    """Repository for ExpenseItem operations."""
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create_bulk(
+        self,
+        expense_id: UUID,
+        items: list[dict],
+    ) -> list[ExpenseItem]:
+        """Create multiple expense items for an expense."""
+        created_items = []
+        for item_data in items:
+            name = item_data.get("name", "")
+            # Normalize name for searching (lowercase, strip whitespace)
+            name_normalized = name.lower().strip()
+
+            item = ExpenseItem(
+                expense_id=expense_id,
+                name=name,
+                name_normalized=name_normalized,
+                quantity=Decimal(str(item_data.get("quantity", 1))),
+                unit_price=Decimal(str(item_data.get("unit_price", 0))),
+                total_price=Decimal(str(item_data.get("total_price", 0))),
+            )
+            self.session.add(item)
+            created_items.append(item)
+
+        await self.session.flush()
+        return created_items
+
+    async def search_by_name(
+        self,
+        user_id: UUID,
+        search_term: str,
+        limit: int = 10,
+        group_chat_id: int | None = None,
+    ) -> list[tuple[ExpenseItem, Expense]]:
+        """Search for items by name, returning the item and its parent expense."""
+        search_normalized = search_term.lower().strip()
+
+        if group_chat_id:
+            expense_filter = Expense.group_chat_id == group_chat_id
+        else:
+            expense_filter = and_(
+                Expense.user_id == user_id,
+                Expense.group_chat_id.is_(None),
+            )
+
+        result = await self.session.execute(
+            select(ExpenseItem, Expense)
+            .join(Expense, ExpenseItem.expense_id == Expense.id)
+            .where(
+                and_(
+                    expense_filter,
+                    ExpenseItem.name_normalized.contains(search_normalized),
+                )
+            )
+            .order_by(Expense.expense_date.desc())
+            .limit(limit)
+        )
+        return [(row[0], row[1]) for row in result.all()]
+
+    async def get_latest_price(
+        self,
+        user_id: UUID,
+        item_name: str,
+        group_chat_id: int | None = None,
+    ) -> tuple[ExpenseItem, Expense] | None:
+        """Get the most recent purchase of an item by name."""
+        results = await self.search_by_name(user_id, item_name, limit=1, group_chat_id=group_chat_id)
+        return results[0] if results else None
 
 
 class LLMConfigRepository:

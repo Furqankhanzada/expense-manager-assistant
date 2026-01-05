@@ -77,12 +77,16 @@ async def init_db() -> None:
                 logger.debug(f"Migration note: {e}")
 
         # Create indexes if they don't exist
-        try:
-            await conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS ix_expenses_group_chat_id ON expenses(group_chat_id)"
-            ))
-        except Exception as e:
-            logger.debug(f"Index creation note: {e}")
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS ix_expenses_group_chat_id ON expenses(group_chat_id)",
+            "CREATE INDEX IF NOT EXISTS ix_expense_items_name_normalized ON expense_items(name_normalized)",
+        ]
+
+        for index_sql in indexes:
+            try:
+                await conn.execute(text(index_sql))
+            except Exception as e:
+                logger.debug(f"Index creation note: {e}")
 
     logger.info("Database tables and migrations completed")
 
