@@ -2,12 +2,130 @@
 
 import json
 import logging
+from dataclasses import dataclass
+from decimal import Decimal
 from typing import Sequence
 
 from src.database.models import Category
 from src.llm.provider import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ExpenseCorrection:
+    """Represents a correction to an expense."""
+    is_correction: bool = False
+    new_category: str | None = None
+    new_description: str | None = None
+    new_amount: Decimal | None = None
+    message: str | None = None  # Any message to show to user
+
+
+CORRECTION_PROMPT = """You are an expense tracking assistant. The user just added an expense and is now sending a follow-up message.
+
+Last expense added:
+- Amount: {amount} {currency}
+- Description: {description}
+- Category: {category}
+
+User's follow-up message: "{message}"
+
+Determine if this is a correction/clarification about the expense. The user might be:
+1. Correcting the category (e.g., "that was for petrol", "it's transportation", "wrong category, should be fuel")
+2. Clarifying the description (e.g., "it was from Shell station", "for my car")
+3. Correcting the amount (e.g., "actually it was 500", "the amount is wrong, it's 1500")
+4. Just chatting (not related to the expense)
+
+Available categories for this user:
+{categories}
+
+Return ONLY a JSON object:
+{{
+  "is_correction": true/false,
+  "correction_type": "category" | "description" | "amount" | "none",
+  "new_category": "exact category name from list" or null,
+  "new_description": "updated description" or null,
+  "new_amount": number or null
+}}
+
+Examples:
+- "that was for petrol" -> {{"is_correction": true, "correction_type": "category", "new_category": "Transportation", "new_description": "Petrol", "new_amount": null}}
+- "it's from Shell" -> {{"is_correction": true, "correction_type": "description", "new_category": null, "new_description": "Petrol from Shell", "new_amount": null}}
+- "actually it was 200" -> {{"is_correction": true, "correction_type": "amount", "new_category": null, "new_description": null, "new_amount": 200}}
+- "thanks" -> {{"is_correction": false, "correction_type": "none", "new_category": null, "new_description": null, "new_amount": null}}
+
+Return ONLY the JSON object, no other text."""
+
+
+async def understand_correction(
+    message: str,
+    last_expense_amount: Decimal,
+    last_expense_currency: str,
+    last_expense_description: str,
+    last_expense_category: str,
+    categories: Sequence[Category],
+    llm: LLMProvider,
+) -> ExpenseCorrection:
+    """Understand if a message is a correction to the last expense.
+
+    Returns: ExpenseCorrection with details about what to update
+    """
+    category_list = "\n".join(f"- {cat.name}" for cat in categories)
+
+    prompt = CORRECTION_PROMPT.format(
+        amount=last_expense_amount,
+        currency=last_expense_currency,
+        description=last_expense_description,
+        category=last_expense_category,
+        message=message,
+        categories=category_list,
+    )
+
+    messages = [{"role": "user", "content": prompt}]
+
+    try:
+        response = await llm.complete(messages, temperature=0.1, max_tokens=200)
+
+        # Clean up response
+        response = response.strip()
+        if response.startswith("```"):
+            response = response.split("```")[1]
+            if response.startswith("json"):
+                response = response[4:]
+        response = response.strip()
+
+        data = json.loads(response)
+
+        correction = ExpenseCorrection(
+            is_correction=data.get("is_correction", False),
+        )
+
+        if correction.is_correction:
+            if data.get("new_category"):
+                # Validate category exists
+                for cat in categories:
+                    if cat.name.lower() == data["new_category"].lower():
+                        correction.new_category = cat.name
+                        break
+
+            if data.get("new_description"):
+                correction.new_description = data["new_description"]
+
+            if data.get("new_amount") is not None:
+                try:
+                    correction.new_amount = Decimal(str(data["new_amount"]))
+                except:
+                    pass
+
+        return correction
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse correction response: {e}")
+        return ExpenseCorrection()
+    except Exception as e:
+        logger.error(f"Error understanding correction: {e}")
+        return ExpenseCorrection()
 
 CATEGORIZE_PROMPT = """You are an expense categorization assistant. Given an expense description, determine the most appropriate category.
 
