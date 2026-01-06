@@ -147,8 +147,8 @@ async def handle_category_spending_query(
     else:
         period_str = f"{start_date.strftime('%b %d')} - {end_date.strftime('%b %d, %Y')}"
 
-    # Build response
-    currency = expenses[0].currency if expenses else user.default_currency
+    # Use user's default currency for display
+    currency = user.default_currency
     lines = [f"<b>Spending on '{category_hint}'</b>"]
     lines.append(f"Period: {period_str}\n")
 
@@ -223,7 +223,8 @@ async def handle_date_spending_query(
         await message.answer(f"No expenses found for {period_str}.")
         return True
 
-    currency = expenses[0].currency if expenses else user.default_currency
+    # Use user's default currency for display
+    currency = user.default_currency
 
     lines = [f"<b>Spending: {period_str}</b>\n"]
 
@@ -289,7 +290,8 @@ async def handle_list_expenses_query(
         await message.answer(f"No expenses found for {period_str}.")
         return True
 
-    currency = expenses[0].currency if expenses else user.default_currency
+    # Use user's default currency for display
+    currency = user.default_currency
 
     # Build detailed list
     category_filter = f" ({category_hint})" if category_hint else ""

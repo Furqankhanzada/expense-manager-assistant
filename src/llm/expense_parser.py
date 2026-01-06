@@ -94,9 +94,14 @@ async def parse_expense(
             except ValueError:
                 pass
 
+        # Only set currency if explicitly provided by LLM
+        currency = data.get("currency")
+        if currency:
+            currency = currency.upper()
+
         return ParsedExpense(
             amount=Decimal(str(data["amount"])),
-            currency=data.get("currency", "USD").upper(),
+            currency=currency,  # None if not specified, will use user's default
             description=data.get("description", ""),
             category=data.get("category"),
             expense_date=expense_date,
@@ -197,10 +202,15 @@ async def parse_receipt_image(
         # Parse expenses
         expenses = []
         for exp in data.get("expenses", []):
+            # Only set currency if explicitly provided
+            exp_currency = exp.get("currency")
+            if exp_currency:
+                exp_currency = exp_currency.upper()
+
             expenses.append(
                 ParsedExpense(
                     amount=Decimal(str(exp["amount"])),
-                    currency=exp.get("currency", "USD").upper(),
+                    currency=exp_currency,  # None if not specified, will use user's default
                     description=exp.get("description", ""),
                     category=exp.get("category"),
                     expense_date=receipt_date,
